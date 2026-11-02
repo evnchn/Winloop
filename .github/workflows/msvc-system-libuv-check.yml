@@ -1,0 +1,66 @@
+name: msvc-system-libuv-check
+# Fork-only check, never merged upstream.
+on:
+  push:
+    branches: [ci/msvc-revert-check]
+
+jobs:
+  with-system-libuv:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install libuv through vcpkg
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          & "$root\vcpkg.exe" install libuv:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $inst = "$root\installed\x64-windows"
+          Add-Content $env:GITHUB_ENV "INCLUDE=$inst\include;$env:INCLUDE"
+          Add-Content $env:GITHUB_ENV "LIB=$inst\lib;$env:LIB"
+          Add-Content $env:GITHUB_PATH "$inst\bin"
+      - run: python -m pip install cython setuptools
+      - name: Build with --use-system-libuv
+        run: python setup.py build_ext --use-system-libuv --inplace
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          @'
+          import asyncio, os
+          os.add_dll_directory(r"C:\vcpkg\installed\x64-windows\bin")
+          import winloop
+          async def main():
+              async def handle(r, w):
+                  w.write(await r.readexactly(5)); await w.drain(); w.close()
+              srv = await asyncio.start_server(handle, "127.0.0.1", 0)
+              port = srv.sockets[0].getsockname()[1]
+              r, w = await asyncio.open_connection("127.0.0.1", port)
+              w.write(b"hello"); await w.drain()
+              got = await r.readexactly(5)
+              assert got == b"hello", got
+              print("loop:", type(asyncio.get_running_loop()).__module__, "echo ok")
+              w.close(); srv.close(); await srv.wait_closed()
+          winloop.run(main())
+          '@ | Set-Content -Encoding utf8 smoke.py
+          python smoke.py
+
+  without-system-libuv-must-fail:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install cython setuptools
+      - name: Flag without libuv installed must fail, not silently build bundled libuv
+        shell: pwsh
+        run: |
+          python setup.py build_ext --use-system-libuv --inplace
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "build succeeded without a system libuv: the flag is being ignored"
+            exit 1
+          }
+          exit 0
